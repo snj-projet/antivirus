@@ -52,18 +52,15 @@ class SimpleAntivirus:
         try:
             if not os.path.isfile(file_path) or not os.access(file_path, os.R_OK):
                 return threats
-
-            # Optimisation: Lecture unique pour hash et contenu
+                
             sha1 = hashlib.sha1()
             content_buffer = b''
-            # Limite de lecture pour l'analyse de contenu (10MB suffit généralement)
             max_content_size = 10 * 1024 * 1024 
             
-            # Lecture unique du fichier
             try:
                 with open(file_path, 'rb') as f:
                     while True:
-                        chunk = f.read(64 * 1024) # 64KB chunks
+                        chunk = f.read(64 * 1024) 
                         if not chunk:
                             break
                         sha1.update(chunk)
@@ -72,15 +69,11 @@ class SimpleAntivirus:
             except Exception:
                 return threats
                 
-            # 1. Vérification Hash (Signature Malware)
             file_hash = sha1.hexdigest()
             if file_hash in self.malware_signatures:
                 threats["malware_match"].append(f"Malware signature match: {file_hash}")
                 return threats 
             
-            # 2. Vérification Patterns Suspects (Regex Bytes)
-            # Optimisation: Uniquement sur les fichiers exécutables/scripts ou de petite taille
-            # On évite de lancer des regex sur des fichiers binaires inconnus ou très gros
             is_executable_or_script = file_path.lower().endswith(tuple(self.target_extensions)) if hasattr(self, 'target_extensions') else True
             
             if content_buffer and (len(content_buffer) < 1024 * 1024 or is_executable_or_script):
@@ -89,8 +82,6 @@ class SimpleAntivirus:
                         pattern_str = pattern.decode(errors='replace')
                         threats["suspicious_patterns"].append(f"Suspicious pattern found: {pattern_str}")
             
-            # 3. Analyse approfondie du contenu
-            # Uniquement si script/exécutable
             if is_executable_or_script:
                 content_threats = self.analyze_file_content(file_path, content=content_buffer)
                 if content_threats:
@@ -196,8 +187,6 @@ class SimpleAntivirus:
                     with stats_lock:
                         stats["current_directory"] = root
                     
-                    # Filtrage optimisé des dossiers
-                    # 1. Suppression des dossiers système Windows protégés/inutiles pour l'analyse
                     if platform.system() == "Windows":
                         system_dirs = ["C:\\Windows\\System32", "C:\\Windows\\SysWOW64"]
                         dirs[:] = [d for d in dirs if not any(os.path.join(root, d).startswith(sys_dir) for sys_dir in system_dirs)]
@@ -205,8 +194,6 @@ class SimpleAntivirus:
                         system_dirs = ["/proc", "/sys", "/dev"]
                         dirs[:] = [d for d in dirs if not any(os.path.join(root, d).startswith(sys_dir) for sys_dir in system_dirs)]
                     
-                    # 2. Suppression basée sur les chemins exclus (excluded_dirs) et noms ignorés (ignored_names)
-                    # On modifie la liste dirs in-place pour que os.walk ne descende pas dedans
                     dirs[:] = [d for d in dirs if d not in ignored_names and not any(os.path.join(root, d).startswith(ex_dir) for ex_dir in excluded_dirs)]
                     
                     if "\\Users\\" in root or "/home/" in root:
@@ -234,10 +221,7 @@ class SimpleAntivirus:
                                 file_priority = priority + 1
                                 
                             file_queue.put((file_priority, file_path))
-                            
-                            # Suppression du sleep pour accélérer
-                            # if stats["files_found"] % 100 == 0:
-                            #    time.sleep(0.001)  
+                     
                                 
                         except Exception:
                             continue
@@ -283,7 +267,6 @@ class SimpleAntivirus:
                 "C:\\Windows\\WinSxS",
                 "C:\\Windows\\Installer",
             ]
-            # Liste des noms de dossiers à ignorer (partout)
             ignored_names = {
                 "node_modules", ".git", ".vscode", ".idea", "__pycache__", "vendor", 
                 "site-packages", "gems", "cargo", "go", "npm-cache"
@@ -311,7 +294,6 @@ class SimpleAntivirus:
         file_queue = queue.PriorityQueue()
         
         collectors = []
-        # Utiliser tous les cœurs disponibles pour la collecte
         collector_count = min(len(drives), self.max_workers)  
         
         drives_per_collector = [drives[i::collector_count] for i in range(collector_count)]
@@ -330,15 +312,12 @@ class SimpleAntivirus:
             with stats_lock:
                 stats["current_file"] = file_path
                 stats["files_analyzed"] += 1
-                should_update = (stats["files_analyzed"] % 50 == 0) # Update GUI only every 50 files
+                should_update = (stats["files_analyzed"] % 50 == 0) 
                 
             if callback and should_update:
                 callback(file_path, threats)
                 
-            # Suppression du délai artificiel pour accélérer le scan
-            # time.sleep(0.01)  
-        
-        # Augmentation du nombre de workers pour utiliser toute la puissance CPU
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
             collector_done_count = 0
