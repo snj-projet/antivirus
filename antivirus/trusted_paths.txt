@@ -1,8 +1,0 @@
-# Dossiers d'applications de confiance supplémentaires (un chemin par ligne).
-# Les fichiers de ces dossiers restent comparés à la base de signatures de malwares,
-# mais ne sont plus signalés comme suspects par l'analyse des patterns.
-# Les dossiers Windows, Program Files, Steam (toutes les bibliothèques) et Epic Games
-# sont déjà détectés automatiquement.
-#
-# Exemple :
-# D:\Jeux\MonJeu
