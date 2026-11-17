@@ -25,11 +25,6 @@ import json
 import glob
 
 def has_valid_signature(file_path: str) -> bool:
-    """
-    Vérifie la signature numérique (Authenticode) intégrée d'un fichier via WinVerifyTrust.
-    True uniquement si le fichier est signé, intact, et que le certificat de l'éditeur
-    remonte à une autorité reconnue par Windows. Toujours False hors Windows.
-    """
     if platform.system() != "Windows":
         return False
 
@@ -54,20 +49,18 @@ def has_valid_signature(file_path: str) -> bool:
                         ("dwProvFlags", wintypes.DWORD), ("dwUIContext", wintypes.DWORD),
                         ("pSignatureSettings", ctypes.c_void_p)]
 
-        # WINTRUST_ACTION_GENERIC_VERIFY_V2
         action = GUID(0x00AAC56B, 0xCD44, 0x11D0,
                       (ctypes.c_ubyte * 8)(0x8C, 0xC2, 0x00, 0xC0, 0x4F, 0xC2, 0x95, 0xEE))
 
         file_info = WINTRUST_FILE_INFO(ctypes.sizeof(WINTRUST_FILE_INFO), file_path, None, None)
         trust_data = WINTRUST_DATA()
         trust_data.cbStruct = ctypes.sizeof(WINTRUST_DATA)
-        trust_data.dwUIChoice = 2            # WTD_UI_NONE
-        trust_data.fdwRevocationChecks = 0   # WTD_REVOKE_NONE
-        trust_data.dwUnionChoice = 1         # WTD_CHOICE_FILE
+        trust_data.dwUIChoice = 2
+        trust_data.fdwRevocationChecks = 0
+        trust_data.dwUnionChoice = 1
         trust_data.pFile = ctypes.pointer(file_info)
-        trust_data.dwStateAction = 0         # WTD_STATEACTION_IGNORE
-        # Aucun accès réseau : pas de vérification de révocation, cache local uniquement
-        trust_data.dwProvFlags = 0x10 | 0x1000  # WTD_REVOCATION_CHECK_NONE | WTD_CACHE_ONLY_URL_RETRIEVAL
+        trust_data.dwStateAction = 0
+        trust_data.dwProvFlags = 0x10 | 0x1000
 
         verify = ctypes.windll.wintrust.WinVerifyTrust
         verify.restype = ctypes.c_long
@@ -77,23 +70,20 @@ def has_valid_signature(file_path: str) -> bool:
         return False
 
 
-# --- Workers de processus pour l'analyse système (vrai parallélisme, hors GIL) ---
 _worker_engine = None
 _worker_stop = None
 
 def _init_scan_worker(target_extensions, trusted_dirs, stop_event):
-    """Initialise un moteur d'analyse par processus worker (patterns compilés une seule fois)"""
     global _worker_engine, _worker_stop
     _worker_engine = SimpleAntivirus(trusted_dirs=trusted_dirs)
     _worker_engine.target_extensions = target_extensions
     _worker_stop = stop_event
 
 def _scan_batch(file_paths):
-    """Analyse un lot de fichiers dans un processus worker, ne renvoie que les fichiers suspects"""
     results = []
     unreadable = 0
     for file_path in file_paths:
-        if _worker_stop.is_set():  # Annulation : on abandonne le reste du lot
+        if _worker_stop.is_set():
             break
         details = {}
         threats = _worker_engine.scan_file(file_path, details=details)
@@ -105,11 +95,6 @@ def _scan_batch(file_paths):
 
 
 class SignatureDatabase:
-    """
-    Base de signatures SHA1 stockée sur disque : empreintes binaires de 20 octets, triées.
-    Le fichier est mappé en mémoire (partagé entre les processus d'analyse, rien n'est
-    chargé dans le tas Python) et interrogé par recherche dichotomique.
-    """
     RECORD_SIZE = 20
 
     def __init__(self, path: str):
@@ -123,7 +108,7 @@ class SignatureDatabase:
         try:
             with open(self.path, 'rb') as f:
                 self._data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        except (OSError, ValueError):  # Fichier absent ou vide
+        except (OSError, ValueError):
             self._data = b""
         self.count = len(self._data) // self.RECORD_SIZE
 
@@ -153,36 +138,28 @@ class SignatureDatabase:
 
 
 class SimpleAntivirus:
-    # Export complet des empreintes SHA1 de MalwareBazaar (abuse.ch)
     SIGNATURES_URL = "https://bazaar.abuse.ch/export/txt/sha1/full/"
 
-    # Applications connues installées dans %LOCALAPPDATA%\Programs (modifiable sans droits admin)
     TRUSTED_APP_NAMES = ["Microsoft VS Code", "Python", "Opera", "Lunar Client", "Antigravity IDE", "Trae"]
-    # Dossiers de jeux cherchés à la racine de chaque lecteur
     TRUSTED_ROOT_NAMES = ["Riot Games", "XboxGames", "Epic Games", "Rockstar Games", "GOG Games"]
 
     def __init__(self, trusted_dirs=None):
-        # Signatures intégrées (la base complète est dans signatures/malware_sha1.bin)
         self.malware_signatures: Set[str] = {
             "e1112134b6dcc8bed54e0e34d8ac272795e73d74",
             "a1112134b6dcc8bed54e0e34d8ac272795e73d75",
-            "3395856ce81f2b7382dee72602f798b642f14140",  # Fichier de test EICAR (inoffensif)
+            "3395856ce81f2b7382dee72602f798b642f14140",
         }
 
         self.signatures_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signatures", "malware_sha1.bin")
         self.signature_db = SignatureDatabase(self.signatures_path)
 
-        # Detect OS once at init (not per-iteration)
         self._is_windows = platform.system() == "Windows"
 
-        # Dossiers d'applications de confiance : leurs fichiers ne sont comparés qu'à la base
-        # de signatures, l'analyse heuristique (patterns) y est désactivée.
         self.trusted_paths_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trusted_paths.txt")
         if trusted_dirs is None:
             trusted_dirs = self.detect_trusted_dirs()
         self.trusted_dirs = tuple(trusted_dirs)
 
-        # Types de fichiers pouvant porter une signature numérique intégrée
         self.signable_extensions = ('.exe', '.dll', '.msi', '.scr', '.com', '.ps1')
 
         self.suspicious_patterns = [
@@ -190,12 +167,8 @@ class SimpleAntivirus:
             rb"(?i)(<script>|</script>)", rb"(?i)(exec\(|eval\(|system\()"
         ]
 
-        # Pre-compile binary suspicious patterns (avoid recompilation per file)
         self._compiled_suspicious = [re.compile(p) for p in self.suspicious_patterns]
 
-        # Equivalent littéral (en minuscules) des patterns ci-dessus : une recherche de
-        # sous-chaîne sur le contenu mis en minuscules est bien plus rapide qu'une regex (?i).
-        # Un pattern absent de cette table retombe sur sa regex compilée.
         self._suspicious_literals = {
             rb"(?i)virus": (b"virus",),
             rb"(?i)malware": (b"malware",),
@@ -206,7 +179,6 @@ class SimpleAntivirus:
             rb"(?i)(exec\(|eval\(|system\()": (b"exec(", b"eval(", b"system("),
         }
 
-        # Libellés affichés à la place des regex brutes
         self._suspicious_labels = {
             rb"(?i)virus": "mot-clé « virus »",
             rb"(?i)malware": "mot-clé « malware »",
@@ -217,8 +189,6 @@ class SimpleAntivirus:
             rb"(?i)(exec\(|eval\(|system\()": "appel exec( / eval( / system(",
         }
 
-        # Poids des indices dans le score de risque (1 par défaut : indice courant dans des
-        # fichiers légitimes ; 3 : comportement typique d'un malware)
         self._threat_weights = {
             "Pattern suspect détecté: Décodage base64 suspect": 2,
             "Pattern suspect détecté: Communication Discord suspecte": 3,
@@ -231,9 +201,6 @@ class SimpleAntivirus:
             "Niveau élevé d'obfuscation détecté": 3,
         }
 
-        # Pre-compile content analysis patterns (used in analyze_file_content)
-        # 3e élément = préfiltre : groupes de mots-clés (minuscules) ; la regex n'est lancée
-        # que si chaque groupe a au moins un mot-clé présent dans le contenu.
         self._compiled_content_patterns = [
             (re.compile(r'eval\s*\(|exec\s*\(', re.IGNORECASE | re.MULTILINE), "Code exécuté dynamiquement",
              ((b"eval", b"exec"),)),
@@ -264,31 +231,20 @@ class SimpleAntivirus:
         self.quarantine_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quarantine")
         os.makedirs(self.quarantine_dir, exist_ok=True)
 
-        # Portion du fichier analysée par les patterns (le fichier entier est toujours haché)
         self.max_content_size = 10 * 1024 * 1024
 
-        # Analyse de la machine : score de risque minimal pour qu'un fichier soit signalé.
-        # En dessous (risque faible), les indices sont trop courants dans les logiciels
-        # légitimes : le fichier est seulement compté, pas listé.
         self.report_min_score = 4
 
-        # Un processus d'analyse par coeur logique (61 = limite de ProcessPoolExecutor sous Windows)
         self.max_workers = min(os.cpu_count() or 4, 61)
-        self.walker_threads = min(os.cpu_count() or 4, 8)  # Threads de parcours des dossiers
-        self.batch_size = 64                       # Fichiers max par lot envoyé à un worker
-        self.batch_bytes = 32 * 1024 * 1024        # Taille cumulée max d'un lot
+        self.walker_threads = min(os.cpu_count() or 4, 8)
+        self.batch_size = 64
+        self.batch_bytes = 32 * 1024 * 1024
         self.scan_queue = queue.Queue()
 
         self._stop_event = threading.Event()
         self.last_scan_stats: Dict = {}
 
     def detect_trusted_dirs(self) -> Tuple[str, ...]:
-        """
-        Recherche les dossiers des applications de confiance : dossiers système et
-        d'installation de Windows, Steam et ses bibliothèques, jeux Epic Games, etc.,
-        plus ceux listés dans trusted_paths.txt.
-        Retourne des chemins normalisés terminés par un séparateur.
-        """
         found = set()
 
         if self._is_windows:
@@ -304,7 +260,6 @@ class SimpleAntivirus:
 
             program_data = os.environ.get("ProgramData", r"C:\ProgramData")
 
-            # Dossiers système et d'installation : y écrire demande les droits administrateur
             found.update([
                 os.environ.get("ProgramFiles"),
                 os.environ.get("ProgramFiles(x86)"),
@@ -314,7 +269,6 @@ class SimpleAntivirus:
                 os.path.join(program_data, "Package Cache"),
             ])
 
-            # Steam : dossier d'installation + bibliothèques de jeux sur les autres disques
             steam_dirs = {
                 read_registry(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
                 read_registry(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
@@ -328,7 +282,6 @@ class SimpleAntivirus:
                 except OSError:
                     pass
 
-            # Epic Games : dossier d'installation de chaque jeu (manifestes du launcher)
             for manifest in glob.glob(os.path.join(program_data, "Epic", "EpicGamesLauncher", "Data", "Manifests", "*.item")):
                 try:
                     with open(manifest, encoding="utf-8") as f:
@@ -336,22 +289,18 @@ class SimpleAntivirus:
                 except (OSError, ValueError):
                     pass
 
-            # Applications connues installées dans le profil utilisateur
             local_app_data = os.environ.get("LOCALAPPDATA")
             if local_app_data:
                 found.add(os.path.join(local_app_data, "Discord"))
                 for name in self.TRUSTED_APP_NAMES:
                     found.add(os.path.join(local_app_data, "Programs", name))
 
-            # Dossiers de jeux à la racine des lecteurs
             for letter in string.ascii_uppercase:
                 for name in self.TRUSTED_ROOT_NAMES:
                     found.add(f"{letter}:\\{name}")
 
-        # Dossier de l'antivirus : son code contient forcément les motifs qu'il recherche
         found.add(os.path.dirname(os.path.abspath(__file__)))
 
-        # Dossiers ajoutés par l'utilisateur (un chemin par ligne, # = commentaire)
         try:
             with open(self.trusted_paths_file, encoding="utf-8") as f:
                 for line in f:
@@ -364,27 +313,19 @@ class SimpleAntivirus:
         trusted = set()
         for path in filter(None, found):
             path = os.path.abspath(path)
-            # Jamais un lecteur entier, et uniquement les dossiers qui existent
             if os.path.isdir(path) and os.path.dirname(path) != path:
                 trusted.add(os.path.normcase(path).rstrip(os.sep) + os.sep)
         return tuple(sorted(trusted))
 
     def is_trusted_path(self, path: str) -> bool:
-        """Indique si un fichier ou dossier se trouve dans un dossier d'application de confiance"""
         if not self.trusted_dirs:
             return False
         return (os.path.normcase(os.path.abspath(path)) + os.sep).startswith(self.trusted_dirs)
 
     def stop_scan(self):
-        """Demande l'arrêt de l'analyse système en cours"""
         self._stop_event.set()
 
     def update_signatures(self, source: Optional[str] = None) -> int:
-        """
-        Télécharge la liste des empreintes SHA1 de malwares connus et reconstruit la base locale.
-        source : URL ou chemin local d'un fichier .zip/.txt contenant une empreinte par ligne
-        (par défaut l'export complet de MalwareBazaar). Retourne le nombre de signatures.
-        """
         source = source or self.SIGNATURES_URL
         downloaded = None
 
@@ -426,7 +367,6 @@ class SimpleAntivirus:
         with open(tmp_path, 'wb') as f:
             f.write(b"".join(sorted(digests)))
 
-        # Le fichier mappé doit être fermé avant de pouvoir être remplacé sous Windows
         self.signature_db.close()
         try:
             os.replace(tmp_path, self.signatures_path)
@@ -446,15 +386,9 @@ class SimpleAntivirus:
             return ""
 
     def assess_risk(self, threats: Dict[str, List[str]]) -> Dict:
-        """
-        Résume le résultat d'une analyse en un niveau de risque :
-        "malware" (signature connue), "élevé", "moyen", "faible" ou "sain".
-        """
         if threats["malware_match"]:
             return {"level": "malware", "score": 1000}
 
-        # Les mots-clés génériques (« payload », <script>, eval(...) se retrouvent ensemble dans
-        # n'importe quel gros fichier JavaScript : ensemble, ils comptent au plus 2 points
         score = min(len(threats["suspicious_patterns"]), 2)
         score += sum(self._threat_weights.get(threat, 1) for threat in threats["content_threats"])
         if score >= 8:
@@ -468,13 +402,6 @@ class SimpleAntivirus:
         return {"level": level, "score": score}
 
     def scan_file(self, file_path: str, details: Optional[Dict] = None, progress_callback=None) -> Dict[str, List[str]]:
-        """
-        Analyse un fichier pour détecter les menaces — version optimisée
-
-        details (optionnel) est rempli avec le déroulement de l'analyse : error (fichier non lu),
-        empty, size, sha1, trusted_dir, signed, heuristics (analyse des patterns effectuée).
-        progress_callback(octets_lus) est appelé pendant la lecture du fichier.
-        """
         threats = {"malware_match": [], "suspicious_patterns": [], "content_threats": []}
 
         if details is None:
@@ -482,12 +409,10 @@ class SimpleAntivirus:
         details.update(error=None, empty=False, size=0, sha1=None, trusted_dir=False, signed=False, heuristics=False)
 
         try:
-            # Le début du fichier (max_content_size) sert à l'analyse des patterns ; le reste
-            # est seulement haché, par blocs : mémoire constante quelle que soit la taille
             try:
                 with open(file_path, 'rb') as f:
                     content_buffer = f.read(self.max_content_size)
-                    if not content_buffer:  # Skip empty files early
+                    if not content_buffer:
                         details["empty"] = True
                         return threats
                     sha1 = hashlib.sha1(content_buffer)
@@ -503,28 +428,24 @@ class SimpleAntivirus:
                             size += len(chunk)
                             if progress_callback:
                                 progress_callback(size)
-                            # Annulation pendant le hachage d'un très gros fichier
                             if _worker_stop is not None and _worker_stop.is_set():
                                 return threats
             except OSError as e:
                 details["error"] = e.strerror or str(e)
                 return threats
 
-            # Check hash against known malware signatures
             digest = sha1.digest()
             file_hash = digest.hex()
             details["size"] = size
             details["sha1"] = file_hash
             if file_hash in self.malware_signatures or digest in self.signature_db:
                 threats["malware_match"].append(f"Malware signature match: {file_hash}")
-                return threats  # Early exit on known malware
+                return threats
 
-            # Application de confiance : seule la base de signatures s'applique
             if self.is_trusted_path(file_path):
                 details["trusted_dir"] = True
                 return threats
 
-            # Fichier signé par un éditeur reconnu et non modifié depuis : pas d'heuristique
             if file_path.lower().endswith(self.signable_extensions) and has_valid_signature(file_path):
                 details["signed"] = True
                 return threats
@@ -538,7 +459,6 @@ class SimpleAntivirus:
 
             details["heuristics"] = True
 
-            # Mise en minuscules une seule fois, partagée par tous les tests
             lowered = content_buffer.lower()
 
             for pattern, compiled_pat in zip(self.suspicious_patterns, self._compiled_suspicious):
@@ -562,19 +482,17 @@ class SimpleAntivirus:
         return threats
 
     def analyze_file_content(self, file_path, content=None, lowered=None):
-        """Analyse le contenu d'un fichier pour détecter des menaces — version optimisée"""
         try:
             if content is None:
                 try:
                     with open(file_path, 'rb') as f:
-                        content = f.read(50 * 1024 * 1024)  # Read up to 50MB at once
+                        content = f.read(50 * 1024 * 1024)
                 except (PermissionError, OSError):
                     return []
 
             if lowered is None:
                 lowered = content.lower()
 
-            # Décodage paresseux : uniquement si un préfiltre laisse passer une regex
             text_content = None
 
             threats = []
@@ -586,7 +504,6 @@ class SimpleAntivirus:
                     text_content = content.decode('utf-8', errors='ignore')
                 if compiled_pattern.search(text_content):
                     threats.append(f"Pattern suspect détecté: {description}")
-                    # Early exit if too many threats found
                     if len(threats) >= 5:
                         break
 
@@ -602,9 +519,6 @@ class SimpleAntivirus:
             return [f"Erreur lors de l'analyse: {str(e)}"]
 
     def batch_scan_worker(self, callback=None):
-        """
-        Fonction de travail pour le scan par lots qui traite les fichiers depuis la file d'attente
-        """
         while True:
             try:
                 file_info = self.scan_queue.get(timeout=1)
@@ -629,24 +543,16 @@ class SimpleAntivirus:
                     self.scan_queue.task_done()
 
     def file_collector_worker(self, dir_queue, all_excluded, ignored_names, target_extensions, file_queue, stop_event, stats_lock, stats):
-        """
-        Thread de parcours : prend un dossier dans dir_queue, y remet ses sous-dossiers
-        et pousse les fichiers à analyser dans file_queue sous la forme (priorité, chemin, taille).
-        - Plusieurs threads se partagent l'arborescence (scandir libère le GIL)
-        - Taille lue depuis l'entrée scandir : les fichiers vides ne sont jamais ouverts
-        - Stats mises à jour une fois par dossier
-        """
         high_priority_exts = {'.exe', '.dll', '.bat', '.ps1', '.vbs', '.js', '.hta', '.scr', '.com', '.pif'}
 
         while True:
             root = dir_queue.get()
             try:
-                if root is None:  # Sentinel
+                if root is None:
                     return
                 if stop_event.is_set():
                     continue
 
-                # Priority based on path (computed once per directory, not per file)
                 root_lower = root.lower()
                 is_user_dir = "\\users\\" in root_lower or "/home/" in root_lower
                 base_priority = 1 if is_user_dir else 2
@@ -671,7 +577,6 @@ class SimpleAntivirus:
 
                             files_seen += 1
 
-                            # Filter by extension FIRST — skip media, archives, fonts, etc.
                             _, ext = os.path.splitext(name.lower())
                             if ext not in target_extensions:
                                 continue
@@ -703,7 +608,7 @@ class SimpleAntivirus:
                                 stats["files_trusted"] += files_found
 
             except OSError:
-                pass  # Dossier inaccessible
+                pass
             except Exception as e:
                 with stats_lock:
                     stats["errors"].append(f"Erreur de collecte: {str(e)}")
@@ -711,10 +616,6 @@ class SimpleAntivirus:
                 dir_queue.task_done()
 
     def _next_batch(self, file_queue, wait):
-        """
-        Construit le prochain lot de fichiers depuis la file de priorité.
-        Retourne (lot, collecte_en_cours) ; un lot vide signifie que rien n'est prêt.
-        """
         batch = []
         batch_bytes = 0
         collecting = True
@@ -728,7 +629,7 @@ class SimpleAntivirus:
             except queue.Empty:
                 break
 
-            if file_path is None:  # Sentinel : parcours terminé, la file est vide
+            if file_path is None:
                 collecting = False
                 break
 
@@ -738,16 +639,6 @@ class SimpleAntivirus:
         return batch, collecting
 
     def scan_system(self, callback=None, progress_callback=None, roots=None) -> List[Tuple[str, Dict[str, List[str]]]]:
-        """
-        Analyse toute la machine — version optimisée
-        - Pipeline: threads de parcours -> file de priorité -> ProcessPoolExecutor
-        - Un processus par coeur : les regex ne sont plus sérialisées par le GIL
-        - Fichiers envoyés par lots pour limiter le coût de communication inter-processus
-
-        callback(file_path, threats) est appelé pour chaque fichier suspect.
-        progress_callback(stats) est appelé ~4 fois par seconde avec une copie des statistiques.
-        roots permet de limiter l'analyse à certains dossiers (par défaut : tous les lecteurs).
-        """
         detected_threats = []
         stop_event = self._stop_event
         stop_event.clear()
@@ -778,7 +669,6 @@ class SimpleAntivirus:
             snap["speed"] = snap["files_analyzed"] / snap["elapsed"] if snap["elapsed"] > 0 else 0
             return snap
 
-        # OS-specific setup (using cached detection)
         if self._is_windows:
             import string
             from ctypes import windll
@@ -818,7 +708,6 @@ class SimpleAntivirus:
         if roots is not None:
             drives = list(roots)
 
-        # Store for scan_file to use
         self.target_extensions = target_extensions
 
         all_excluded = tuple(os.path.normcase(d) for d in excluded_dirs + [self.quarantine_dir])
@@ -830,7 +719,6 @@ class SimpleAntivirus:
             if os.path.exists(drive):
                 dir_queue.put(drive)
 
-        # Start collector threads (ils se partagent tous les dossiers via dir_queue)
         collectors = []
         for _ in range(self.walker_threads):
             collector = threading.Thread(
@@ -842,39 +730,37 @@ class SimpleAntivirus:
             collectors.append(collector)
 
         def finish_collection():
-            dir_queue.join()  # Tous les dossiers ont été parcourus
+            dir_queue.join()
             for _ in collectors:
                 dir_queue.put(None)
             with stats_lock:
-                stats["collecting"] = False  # files_found est désormais définitif
-            file_queue.put((999, None, 0))  # Sentinel
+                stats["collecting"] = False
+            file_queue.put((999, None, 0))
 
         collection_watcher = threading.Thread(target=finish_collection)
         collection_watcher.daemon = True
         collection_watcher.start()
 
-        worker_stop = multiprocessing.Event()  # Partagé avec les processus d'analyse
+        worker_stop = multiprocessing.Event()
         executor = concurrent.futures.ProcessPoolExecutor(
             max_workers=self.max_workers,
             initializer=_init_scan_worker,
             initargs=(target_extensions, self.trusted_dirs, worker_stop)
         )
 
-        pending = {}  # future -> nombre de fichiers du lot
-        max_pending = self.max_workers * 2  # Keep pipeline full but bounded
+        pending = {}
+        max_pending = self.max_workers * 2
         collecting = True
         last_progress_time = time.time()
 
         try:
             while (collecting or pending) and not stop_event.is_set():
-                # --- Phase 1: Fill the pipeline with new work ---
                 while collecting and len(pending) < max_pending:
                     batch, collecting = self._next_batch(file_queue, wait=0 if pending else 0.05)
                     if not batch:
                         break
                     pending[executor.submit(_scan_batch, batch)] = len(batch)
 
-                # --- Phase 2: Harvest completed batches (bloque sans attente active) ---
                 if pending:
                     done_futures, _ = concurrent.futures.wait(
                         pending, timeout=0.05, return_when=concurrent.futures.FIRST_COMPLETED
@@ -917,7 +803,6 @@ class SimpleAntivirus:
                             for path, threats in batch_threats:
                                 callback(path, threats)
 
-                # --- Phase 3: Throttled progress update (time-based) ---
                 if progress_callback:
                     now = time.time()
                     if (now - last_progress_time) >= 0.25:
@@ -931,7 +816,7 @@ class SimpleAntivirus:
             cancelled = stop_event.is_set()
             if cancelled:
                 worker_stop.set()
-            stop_event.set()  # Arrête aussi les threads de parcours
+            stop_event.set()
 
             executor.shutdown(wait=True, cancel_futures=True)
 
@@ -951,16 +836,12 @@ class SimpleAntivirus:
         return detected_threats
 
     def move_to_quarantine(self, file_path: str) -> str:
-        """
-        Déplace un fichier vers le dossier de quarantaine et retourne le nouveau chemin
-        """
         try:
             if not os.path.exists(file_path):
                 raise Exception(f"Le fichier n'existe pas: {file_path}")
                 
             file_name = os.path.basename(file_path)
             timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-            # Extension ajoutée pour que le fichier ne puisse plus être exécuté par un double-clic
             quarantine_name = f"{timestamp}_{file_name}.quarantine"
             quarantine_path = os.path.join(self.quarantine_dir, quarantine_name)
             
@@ -978,11 +859,6 @@ class SimpleAntivirus:
 
 
 class CircularProgress(tk.Canvas):
-    """
-    Anneau de progression : l'arc se remplit dans le sens horaire et sa couleur évolue
-    avec l'avancement (start_color -> end_color), ou prend une couleur imposée (verdict).
-    Le rendu passe par PIL avec suréchantillonnage pour obtenir des bords lisses.
-    """
     SUPERSAMPLING = 4
 
     def __init__(self, master, size, bg, track_color, start_color, end_color, text_color, subtext_color):
@@ -1020,7 +896,6 @@ class CircularProgress(tk.Canvas):
         return "#" + "".join(f"{int(x + (y - x) * ratio):02x}" for x, y in zip(a, b))
 
     def set(self, ratio, color=None, text=None, subtext=None):
-        """Fixe l'avancement (0 à 1). color/text imposent la couleur de l'arc et le texte central."""
         try:
             self._target = max(0.0, min(1.0, ratio))
             self._forced_color = color
@@ -1030,7 +905,7 @@ class CircularProgress(tk.Canvas):
             if self._animation_job is None:
                 self._animate()
         except tk.TclError:
-            pass  # Widget détruit (fenêtre modale fermée)
+            pass
 
     def reset(self, subtext=""):
         try:
@@ -1070,7 +945,6 @@ class CircularProgress(tk.Canvas):
             color = self._forced_color or self._mix(self._start_color, self._end_color, self._shown)
             sweep = 360 * self._shown
             draw.arc(box, -90, -90 + sweep, fill=color, width=width)
-            # Extrémités arrondies
             radius = (size - width) / 2
             for angle in (-90, -90 + sweep):
                 x = size / 2 + radius * math.cos(math.radians(angle))
@@ -1110,7 +984,6 @@ class ModernAntivirusGUI:
             "modal_overlay": "#1a1b26"       
         }
         
-        # Couleur de l'anneau de progression : dégradé pendant l'analyse, puis selon le verdict
         self.ring_colors = {"start": "#7aa2f7", "end": "#9ece6a"}
         self.verdict_colors = {
             "sain": "#9ece6a",
@@ -1177,7 +1050,6 @@ class ModernAntivirusGUI:
         self.create_gui()
         
     def create_gui(self):
-        """Création de l'interface graphique"""
         
         self.create_background_canvas()
         
@@ -1224,7 +1096,6 @@ class ModernAntivirusGUI:
         self.status_bar.pack(fill="x", side="bottom", padx=0, pady=0)
         
     def create_background_canvas(self):
-        """Crée un canvas avec un arrière-plan élégant"""
         self.bg_frame = ctk.CTkFrame(self.app, fg_color=self.colors["background"])
         self.bg_frame.pack(fill="both", expand=True)
         
@@ -1245,7 +1116,6 @@ class ModernAntivirusGUI:
             self.draw_background()
     
     def initialize_particles(self):
-        """Initialise les particules pour l'arrière-plan"""
         self.background["particles"] = []
         
         width = self.app.winfo_width() or 1000  
@@ -1263,7 +1133,6 @@ class ModernAntivirusGUI:
             self.background["particles"].append(particle)
     
     def draw_background(self):
-        """Dessine l'arrière-plan avec motif hexagonal et dégradé"""
         self.bg_canvas.delete("all")
         
         width = self.app.winfo_width() or 1000
@@ -1305,7 +1174,6 @@ class ModernAntivirusGUI:
             )
     
     def animate_background(self):
-        """Anime l'arrière-plan"""
         self.draw_background()
         
         width = self.app.winfo_width() or 1000
@@ -1327,7 +1195,6 @@ class ModernAntivirusGUI:
             self.app.after(self.background["update_interval"], self.animate_background)
     
     def apply_opacity(self, hex_color, opacity):
-        """Convertit une couleur hexadécimale avec opacité en format pour tkinter"""
         r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
         
         bg_r, bg_g, bg_b = int(self.colors["background"][1:3], 16), int(self.colors["background"][3:5], 16), int(self.colors["background"][5:7], 16)
@@ -1339,7 +1206,6 @@ class ModernAntivirusGUI:
         return f"#{r:02x}{g:02x}{b:02x}"
     
     def create_card(self, card_id, title, icon, color, row, column):
-        """Crée une carte interactive"""
         card_frame = ctk.CTkFrame(
             self.cards_frame, 
             fg_color=color, 
@@ -1392,7 +1258,6 @@ class ModernAntivirusGUI:
         card_frame.bind("<Leave>", on_leave)
     
     def show_modal(self, card_id):
-        """Affiche une fenêtre modale avec le contenu de la carte"""
         if self.modal_visible:
             self.content_frame.configure(fg_color=self.colors[card_id])
             
@@ -1465,18 +1330,12 @@ class ModernAntivirusGUI:
         self.modal_visible = True
     
     def hide_modal(self):
-        """Ferme la fenêtre modale"""
         if hasattr(self, 'modal_overlay'):
             self.modal_overlay.destroy()
             self.modal_content = None
             self.modal_visible = False
     
     def _build_scan_panel(self, content_frame, color_key, placeholder):
-        """
-        Mise en page commune aux analyses (fichier et machine) :
-        colonne de gauche = anneau de progression, état et boutons ; à droite = résultats.
-        Retourne (colonne_gauche, anneau, label_état, label_stats, zone_résultats).
-        """
         base_color = self.colors[color_key]
         try:
             scaling = ctk.ScalingTracker.get_window_scaling(self.app)
@@ -1570,7 +1429,6 @@ class ModernAntivirusGUI:
         )
         self.select_file_button.pack()
 
-        # Affiché uniquement quand le dernier fichier analysé est signalé
         self.quarantine_button = self._create_action_button(
             left, "Mettre en quarantaine", self.quarantine_scanned_file, "#E74C3C", "#C0392B"
         )
@@ -1593,12 +1451,10 @@ class ModernAntivirusGUI:
         )
         self.scan_system_button.pack()
 
-        # Affiché uniquement pendant une analyse
         self.cancel_scan_button = self._create_action_button(
             left, "Annuler l'analyse", self.cancel_scan, "#E74C3C", "#C0392B"
         )
 
-        # Fenêtre rouverte pendant une analyse : on retrouve l'état en cours
         if getattr(self, 'scan_running', False):
             self.scan_system_button.configure(state="disabled")
             self.cancel_scan_button.pack(pady=(8, 0))
@@ -1735,7 +1591,6 @@ class ModernAntivirusGUI:
             self.scan_file(os.path.normpath(file_path))
 
     def scan_file(self, file_path):
-        """Analyse un fichier dans un thread séparé (l'interface reste utilisable)"""
         self.file_scan_running = True
         self.last_scanned_file = None
         self.select_file_button.configure(state="disabled")
@@ -1761,7 +1616,6 @@ class ModernAntivirusGUI:
         last_update = [0.0]
 
         def on_progress(bytes_done):
-            # Appelé depuis le thread d'analyse : mise à jour limitée à 10 par seconde
             now = time.time()
             if total_size and (now - last_update[0]) >= 0.1:
                 last_update[0] = now
@@ -1780,11 +1634,10 @@ class ModernAntivirusGUI:
         if not self.file_scan_running:
             return
         try:
-            # La lecture du fichier n'est qu'une partie de l'analyse : on garde 5% pour la suite
             ratio = min(ratio, 1.0) * 0.95
             self.file_ring.set(ratio)
         except tk.TclError:
-            pass  # Fenêtre modale fermée pendant l'analyse
+            pass
 
     def _format_size(self, size):
         for unit in ("octets", "Ko", "Mo", "Go"):
@@ -1793,7 +1646,6 @@ class ModernAntivirusGUI:
             size /= 1024
 
     def _show_file_result(self, file_path, threats, details):
-        """Affiche le verdict d'une analyse de fichier (thread principal)"""
         self.file_scan_running = False
         risk = self.antivirus.assess_risk(threats)
         indices = threats["suspicious_patterns"] + threats["content_threats"]
@@ -1801,7 +1653,6 @@ class ModernAntivirusGUI:
 
         lines = [f"🔍 Analyse du fichier: {file_path}\n\n"]
 
-        # --- Verdict ---
         if details["error"]:
             status = "Analyse impossible"
             lines.append("❓ ANALYSE IMPOSSIBLE\n")
@@ -1830,13 +1681,11 @@ class ModernAntivirusGUI:
             status = "Aucune menace détectée"
             lines.append("✅ AUCUNE MENACE DÉTECTÉE\n")
 
-        # --- Indices ---
         if indices:
             lines.append("\nIndices trouvés :\n")
             for threat in indices:
                 lines.append(f"  ⚠️ {threat}\n")
 
-        # --- Détail des vérifications ---
         if not details["error"] and not details["empty"]:
             lines.append("\nVérifications effectuées :\n")
             lines.append(f"  Taille : {self._format_size(details['size'])}\n")
@@ -1878,12 +1727,11 @@ class ModernAntivirusGUI:
                 self.last_scanned_file = file_path
                 self.quarantine_button.pack(pady=(8, 0), after=self.select_file_button)
         except tk.TclError:
-            pass  # Fenêtre modale fermée pendant l'analyse
+            pass
 
         self.status_bar.configure(text=f"Analyse terminée — {status}")
 
     def quarantine_scanned_file(self):
-        """Met en quarantaine le dernier fichier analysé, après confirmation"""
         file_path = getattr(self, 'last_scanned_file', None)
         if not file_path:
             return
@@ -1909,9 +1757,6 @@ class ModernAntivirusGUI:
         self.status_bar.configure(text="Fichier mis en quarantaine")
 
     def scan_system(self):
-        """
-        Analyse toute la machine et affiche les résultats
-        """
         if hasattr(self, 'scan_thread') and self.scan_thread.is_alive():
             messagebox.showinfo("Information", "Une analyse est déjà en cours.")
             return
@@ -1955,15 +1800,13 @@ class ModernAntivirusGUI:
         self.scan_thread.start()
 
     def _end_system_scan_ui(self):
-        """Rétablit les boutons de l'analyse système en fin d'analyse"""
         try:
             self.cancel_scan_button.pack_forget()
             self.scan_system_button.configure(state="normal")
         except (AttributeError, tk.TclError):
-            pass  # Fenêtre modale fermée pendant l'analyse
+            pass
 
     def _update_scan_progress(self, scan_stats):
-        """Mise à jour de l'interface depuis le thread principal"""
         if not self.scan_running:
             return
 
@@ -1976,7 +1819,6 @@ class ModernAntivirusGUI:
         try:
             if found:
                 self.system_ring.set(min(analyzed / found, 1.0), subtext=f"{analyzed} / {found}")
-                # Tant que le parcours des disques continue, le total n'est pas définitif
                 self.system_progress_label.configure(
                     text="Recherche des fichiers…" if scan_stats["collecting"] else "Analyse en cours…"
                 )
@@ -1986,10 +1828,9 @@ class ModernAntivirusGUI:
             stats_text += f"Dossier: {scan_stats['current_directory']}"
             self.system_stats_label.configure(text=stats_text)
         except tk.TclError:
-            pass  # Fenêtre modale fermée pendant l'analyse
+            pass
 
     def _finish_scan(self, detected_threats):
-        """Finaliser l'analyse et mettre à jour l'interface"""
         self._end_system_scan_ui()
 
         self.detected_threats = detected_threats
@@ -2003,8 +1844,6 @@ class ModernAntivirusGUI:
             self.system_result_text.delete("0.0", "end")
             self.system_result_text.insert("end", "✅ Aucune menace détectée sur le système !\n")
         else:
-            # Une seule insertion dans le widget (au lieu d'une par ligne)
-            # Les fichiers les plus risqués en premier
             ranked = sorted(
                 ((self.antivirus.assess_risk(threats), file_path, threats) for file_path, threats in detected_threats),
                 key=lambda item: -item[0]["score"]
@@ -2036,7 +1875,6 @@ class ModernAntivirusGUI:
             if hasattr(self, 'show_threat_management_window'):
                 self.show_threat_management_window()
 
-        # Couleur de l'anneau selon le niveau de risque le plus grave rencontré
         levels = {self.antivirus.assess_risk(threats)["level"] for _, threats in detected_threats}
         worst = next((level for level in ("malware", "élevé", "moyen", "faible") if level in levels), "sain")
         self.system_ring.set(
@@ -2064,7 +1902,6 @@ class ModernAntivirusGUI:
         self.scan_running = False
     
     def _handle_scan_error(self, error_message):
-        """Gérer les erreurs d'analyse"""
         self._end_system_scan_ui()
             
         self.system_result_text.insert("end", f"\n❌ Erreur lors de l'analyse: {error_message}\n")
@@ -2073,7 +1910,6 @@ class ModernAntivirusGUI:
         self.scan_running = False
     
     def cancel_scan(self):
-        """Annuler l'analyse en cours"""
         if hasattr(self, 'scan_running') and self.scan_running:
             self.scan_running = False
             self.antivirus.stop_scan()
@@ -2087,7 +1923,6 @@ class ModernAntivirusGUI:
         self.app.mainloop()
 
     def toggle_realtime_protection(self):
-        """Active ou désactive la protection en temps réel"""
         self.realtime_protection_active = not self.realtime_protection_active
         
         if self.realtime_protection_active:
@@ -2113,7 +1948,6 @@ class ModernAntivirusGUI:
             self.activity_text.configure(state="disabled")
     
     def simulate_realtime_activity(self):
-        """Simule l'activité de protection en temps réel pour démonstration"""
         if not self.realtime_protection_active:
             return
             
@@ -2139,7 +1973,6 @@ class ModernAntivirusGUI:
         self.app.after(5000, self.simulate_realtime_activity) 
 
     def adjust_color_brightness(self, hex_color, factor):
-        """Ajuste la luminosité d'une couleur hexadécimale"""
         r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
         
         if factor > 0:
@@ -2156,7 +1989,6 @@ class ModernAntivirusGUI:
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     if len(sys.argv) > 1 and sys.argv[1] == "--update-signatures":
-        # Usage: python antivirus.py --update-signatures [url ou fichier local]
         count = SimpleAntivirus().update_signatures(sys.argv[2] if len(sys.argv) > 2 else None)
         print(f"Base de signatures mise à jour : {count} signatures")
     else:
